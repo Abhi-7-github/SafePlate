@@ -1,0 +1,47 @@
+# --- Dependencies ---
+node_modules/
+**/node_modules/
+
+# --- Build outputs ---
+dist/
+build/
+coverage/
+**/dist/
+**/build/
+**/coverage/
+
+# --- Vite / React ---
+client/dist/
+client/dist-ssr/
+*.local
+
+# --- Node / Express runtime ---
+server/.cache/
+
+# --- Logs ---
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# --- Env / secrets ---
+.env
+.env.*
+!*.example
+
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# --- Misc ---
+*.tmp
+*.temp
