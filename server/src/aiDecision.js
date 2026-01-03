@@ -1,5 +1,350 @@
 import fetch from 'node-fetch';
 
+function languageNameFromCode(code) {
+  const c = String(code || '').trim();
+  const map = {
+    as: 'Assamese',
+    bn: 'Bengali',
+    brx: 'Bodo',
+    doi: 'Dogri',
+    gu: 'Gujarati',
+    hi: 'Hindi',
+    kn: 'Kannada',
+    ks: 'Kashmiri',
+    kok: 'Konkani',
+    mai: 'Maithili',
+    ml: 'Malayalam',
+    'mni-Mtei': 'Meitei (Manipuri)',
+    mr: 'Marathi',
+    ne: 'Nepali',
+    or: 'Odia',
+    pa: 'Punjabi',
+    sa: 'Sanskrit',
+    sat: 'Santali',
+    sd: 'Sindhi',
+    ta: 'Tamil',
+    te: 'Telugu',
+    ur: 'Urdu',
+    en: 'English'
+  };
+  return map[c] || 'the selected language';
+}
+
+function extractFirstJsonObject(text) {
+  if (typeof text !== 'string') return null;
+  const t = text.trim();
+  if (!t) return null;
+
+  const start = t.indexOf('{');
+  if (start < 0) return null;
+  // Very small heuristic to find a matching closing brace.
+  let depth = 0;
+  for (let i = start; i < t.length; i += 1) {
+    const ch = t[i];
+    if (ch === '{') depth += 1;
+    if (ch === '}') depth -= 1;
+    if (depth === 0) {
+      const candidate = t.slice(start, i + 1);
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function containsDigitsOrQuestionMarks(value) {
+  if (typeof value !== 'string') return false;
+  // No questions; no numbers.
+  return /\d/.test(value) || /\?/.test(value);
+}
+
+function validateTranslatedDecisionCard(card, confidence) {
+  if (!card || typeof card !== 'object') return false;
+  if (typeof card.verdict !== 'string' || !card.verdict.trim()) return false;
+  if (!Array.isArray(card.whyThisMatters) || card.whyThisMatters.length === 0) return false;
+  if (!Array.isArray(card.whyYouMightCare) || card.whyYouMightCare.length === 0) return false;
+  if (typeof card.uncertainty !== 'string' || !card.uncertainty.trim()) return false;
+  if (typeof card.closure !== 'string' || !card.closure.trim()) return false;
+
+  const allStrings = [
+    card.verdict,
+    ...card.whyThisMatters,
+    ...card.whyYouMightCare,
+    card.uncertainty,
+    ...(Array.isArray(card.betterChoiceHint) ? card.betterChoiceHint : []),
+    card.closure
+  ];
+
+  if (allStrings.some((s) => typeof s !== 'string')) return false;
+  if (allStrings.some((s) => containsDigitsOrQuestionMarks(s))) return false;
+
+  // Confidence must be carried over exactly.
+  if (card.confidence !== confidence) return false;
+  return true;
+}
+
+export async function translateDecisionCardWithAI({ decisionCard, language }) {
+  if (!decisionCard || typeof decisionCard !== 'object') return { ok: false, reason: 'No decisionCard provided' };
+  const langCode = String(language || 'en');
+  if (langCode.toLowerCase() === 'en') return { ok: true, decisionCard };
+
+  const confidence = decisionCard.confidence;
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence)) {
+    return { ok: false, reason: 'Invalid confidence' };
+  }
+
+  const targetName = languageNameFromCode(langCode);
+
+  const payload = {
+    verdict: decisionCard.verdict,
+    whyThisMatters: Array.isArray(decisionCard.whyThisMatters) ? decisionCard.whyThisMatters.slice(0, 2) : [],
+    whyYouMightCare: Array.isArray(decisionCard.whyYouMightCare) ? decisionCard.whyYouMightCare.slice(0, 1) : [],
+    uncertainty: decisionCard.uncertainty,
+    betterChoiceHint: Array.isArray(decisionCard.betterChoiceHint) ? decisionCard.betterChoiceHint.slice(0, 1) : [],
+    closure: decisionCard.closure
+  };
+
+  const system = `You are a careful translator for SafePlate.
+
+Translate ONLY the meaning of the decision card fields into ${targetName}.
+
+Strict rules:
+- Output MUST be valid JSON only. No markdown.
+- Keep the same JSON keys.
+- Keep arrays the same length (do not add/remove items).
+- Do NOT add any numbers anywhere.
+- Do NOT add any question marks.
+- Do NOT add ingredients, nutrition facts, codes, or percentages.
+- Keep wording calm and simple.`;
+
+  const user = `Translate this JSON into ${targetName}:
+${JSON.stringify(payload)}`;
+
+  const provider = String(process.env.AI_PROVIDER || 'openai').toLowerCase();
+  let text = '';
+
+  if (provider === 'gemini') {
+    const apiKey = process.env.GEMINI_API_KEY;
+    const baseUrl = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
+    const model = normalizeGeminiModelName(process.env.GEMINI_MODEL || 'gemini-1.5-flash');
+    if (!apiKey) return { ok: false, reason: 'GEMINI_API_KEY not set' };
+
+    async function callGeminiJson(promptText, systemText) {
+      const url = `${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemText }] },
+          contents: [{ role: 'user', parts: [{ text: promptText }] }],
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: 'application/json'
+          }
+        })
+      });
+      const data = await safeJson(res);
+      return { res, data };
+    }
+
+    const firstCall = await callGeminiJson(user, system);
+    if (!firstCall.res.ok) {
+      const msg = extractGoogleErrorMessage(firstCall.data);
+      return {
+        ok: false,
+        reason: `AI translation failed (${firstCall.res.status})${msg ? `: ${msg}` : ''}`
+      };
+    }
+
+    text =
+      firstCall.data?.candidates?.[0]?.content?.parts
+        ?.map((p) => p?.text)
+        .filter(Boolean)
+        .join('') ?? '';
+
+    // If Gemini still didn't return clean JSON, try one strict retry.
+    if (!extractFirstJsonObject(text)) {
+      const strictSystem = `${system}\n\nOutput MUST be a single JSON object, nothing else.`;
+      const retry = await callGeminiJson(user, strictSystem);
+      if (retry.res.ok) {
+        text =
+          retry.data?.candidates?.[0]?.content?.parts
+            ?.map((p) => p?.text)
+            .filter(Boolean)
+            .join('') ?? text;
+      }
+    }
+  } else {
+    const apiKey = process.env.OPENAI_API_KEY;
+    const baseUrl = (process.env.OPENAI_BASE_URL || 'https://api.openai.com').replace(/\/$/, '');
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    if (!apiKey) return { ok: false, reason: 'OPENAI_API_KEY not set' };
+
+    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.1,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user }
+        ]
+      })
+    });
+    const data = await safeJson(res);
+    if (!res.ok) {
+      return { ok: false, reason: `AI translation failed (${res.status})` };
+    }
+    text = data?.choices?.[0]?.message?.content ?? '';
+  }
+
+  const parsed = extractFirstJsonObject(text);
+  if (!parsed) return { ok: false, reason: 'AI translation was not valid JSON' };
+
+  const translated = {
+    verdict: parsed.verdict,
+    whyThisMatters: parsed.whyThisMatters,
+    whyYouMightCare: parsed.whyYouMightCare,
+    uncertainty: parsed.uncertainty,
+    betterChoiceHint: parsed.betterChoiceHint,
+    closure: parsed.closure,
+    confidence
+  };
+
+  if (!validateTranslatedDecisionCard(translated, confidence)) {
+    return { ok: false, reason: 'AI translation failed validation' };
+  }
+
+  return { ok: true, decisionCard: translated };
+}
+
+function validateTranslatedLabels(obj) {
+  const required = [
+    'decisionCard',
+    'verdict',
+    'whyThisMatters',
+    'whyYouMightCare',
+    'confidence',
+    'uncertainty',
+    'betterChoiceHint',
+    'closure'
+  ];
+  if (!obj || typeof obj !== 'object') return false;
+  for (const k of required) {
+    if (typeof obj[k] !== 'string' || !obj[k].trim()) return false;
+    if (/\d/.test(obj[k])) return false;
+  }
+  return true;
+}
+
+export async function translateUiLabelsWithAI({ labels, language }) {
+  const langCode = String(language || 'en');
+  if (langCode.toLowerCase() === 'en') return { ok: true, labels };
+
+  const targetName = languageNameFromCode(langCode);
+  const base = labels && typeof labels === 'object' ? labels : null;
+  if (!base) return { ok: false, reason: 'No labels provided' };
+
+  const system = `You translate short UI labels for SafePlate into ${targetName}.
+
+Strict rules:
+- Output MUST be valid JSON only. No markdown.
+- Keep the same JSON keys.
+- Do NOT add numbers.
+- Keep wording short.`;
+
+  const user = `Translate this JSON into ${targetName}:
+${JSON.stringify(base)}`;
+
+  const provider = String(process.env.AI_PROVIDER || 'openai').toLowerCase();
+  let text = '';
+
+  if (provider === 'gemini') {
+    const apiKey = process.env.GEMINI_API_KEY;
+    const baseUrl = (process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
+    const model = normalizeGeminiModelName(process.env.GEMINI_MODEL || 'gemini-1.5-flash');
+    if (!apiKey) return { ok: false, reason: 'GEMINI_API_KEY not set' };
+
+    async function callGeminiJson(promptText, systemText) {
+      const url = `${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemText }] },
+          contents: [{ role: 'user', parts: [{ text: promptText }] }],
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: 'application/json'
+          }
+        })
+      });
+      const data = await safeJson(res);
+      return { res, data };
+    }
+
+    const firstCall = await callGeminiJson(user, system);
+    if (!firstCall.res.ok) {
+      const msg = extractGoogleErrorMessage(firstCall.data);
+      return { ok: false, reason: `AI label translation failed (${firstCall.res.status})${msg ? `: ${msg}` : ''}` };
+    }
+
+    text =
+      firstCall.data?.candidates?.[0]?.content?.parts
+        ?.map((p) => p?.text)
+        .filter(Boolean)
+        .join('') ?? '';
+
+    if (!extractFirstJsonObject(text)) {
+      const strictSystem = `${system}\n\nOutput MUST be a single JSON object, nothing else.`;
+      const retry = await callGeminiJson(user, strictSystem);
+      if (retry.res.ok) {
+        text =
+          retry.data?.candidates?.[0]?.content?.parts
+            ?.map((p) => p?.text)
+            .filter(Boolean)
+            .join('') ?? text;
+      }
+    }
+  } else {
+    const apiKey = process.env.OPENAI_API_KEY;
+    const baseUrl = (process.env.OPENAI_BASE_URL || 'https://api.openai.com').replace(/\/$/, '');
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    if (!apiKey) return { ok: false, reason: 'OPENAI_API_KEY not set' };
+
+    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.1,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user }
+        ]
+      })
+    });
+    const data = await safeJson(res);
+    if (!res.ok) return { ok: false, reason: `AI label translation failed (${res.status})` };
+    text = data?.choices?.[0]?.message?.content ?? '';
+  }
+
+  const parsed = extractFirstJsonObject(text);
+  if (!parsed) return { ok: false, reason: 'AI label translation was not valid JSON' };
+  if (!validateTranslatedLabels(parsed)) return { ok: false, reason: 'AI label translation failed validation' };
+  return { ok: true, labels: parsed };
+}
+
 function normalizeGeminiModelName(model) {
   if (typeof model !== 'string' || !model.trim()) return 'gemini-1.5-flash';
   // Gemini Developer API expects model ids like "gemini-1.5-flash" (without "models/")
@@ -90,9 +435,12 @@ Verdict: [Safe / Okay Occasionally / Better to Avoid]
 Why this matters:
 • [Reason 1 written in plain human language]
 • [Reason 2 if relevant, otherwise omit]
+• [Reason 3 in rare cases, otherwise omit]
+
+
 
 Why you might care:
-• [One intent-inferred reason that applies to most people]
+• [Two intent-inferred reason that applies to most people]
 
 Confidence:
 [Number between 50% and 90%]%

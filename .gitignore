@@ -18,6 +18,9 @@ client/dist-ssr/
 # --- Node / Express runtime ---
 server/.cache/
 
+# --- OCR artifacts ---
+server/*.traineddata
+
 # --- Logs ---
 logs/
 *.log

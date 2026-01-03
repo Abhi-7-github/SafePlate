@@ -3,17 +3,52 @@ import express from 'express';
 import cors from 'cors';
 import { decideFromScan, formatDecisionCardText } from './decisionEngine.js';
 import { connectMongoIfConfigured } from './mongo.js';
-import { decideWithAI } from './aiDecision.js';
+import { decideWithAI, translateDecisionCardWithAI, translateUiLabelsWithAI } from './aiDecision.js';
+import { ocrFromImageDataUrl } from './ocr.js';
+import { formatLocalizedDecisionCardText, getUiLabels, localizeDecisionCard, normalizeLanguage } from './localize.js';
+import detectIndianLanguageFromText from './langDetect.js';
+
+const labelCache = new Map();
+
+async function resolveLabels(language) {
+  const lang = normalizeLanguage(language);
+  const base = getUiLabels(lang);
+  // If we have explicit labels (en/hi), use them.
+  if (lang === 'en' || lang === 'hi') return base;
+  // For other Indian languages, try cached AI-translated labels.
+  if (labelCache.has(lang)) return labelCache.get(lang);
+  const translated = await translateUiLabelsWithAI({ labels: getUiLabels('en'), language: lang });
+  if (translated.ok) {
+    labelCache.set(lang, translated.labels);
+    return translated.labels;
+  }
+  return base;
+}
 
 let aiCooldownUntil = 0;
 
 const app = express();
 
 app.use(cors({ origin: true }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '15mb' }));
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'safeplate-server' });
+});
+
+app.post('/api/ocr', async (req, res) => {
+  const imageDataUrl = req.body?.imageDataUrl;
+  const options = req.body?.options;
+
+  try {
+    const out = await ocrFromImageDataUrl({ imageDataUrl, options });
+    if (!out.ok) {
+      return res.status(out.status || 400).json({ ok: false, error: out.error || 'Invalid request' });
+    }
+    return res.json({ ok: true, text: out.text || '' });
+  } catch {
+    return res.status(503).json({ ok: false, error: 'OCR service unavailable' });
+  }
 });
 
 app.get('/api/debug/ai', (_req, res) => {
@@ -53,6 +88,13 @@ app.post('/api/debug/ai-decision', async (req, res) => {
 
 app.post('/api/decision', async (req, res) => {
   const scannedText = req.body?.scannedText;
+  const requested = req.body?.language;
+  const resolvedLanguage =
+    !requested || String(requested).toLowerCase() === 'auto'
+      ? detectIndianLanguageFromText(typeof scannedText === 'string' ? scannedText : '')
+      : normalizeLanguage(requested);
+
+  const labels = await resolveLabels(resolvedLanguage);
 
   // Prefer AI when configured; fall back to heuristic if unavailable/invalid.
   const useAI = String(process.env.USE_AI || '').toLowerCase() === 'true';
@@ -74,10 +116,22 @@ app.post('/api/decision', async (req, res) => {
     try {
       const ai = await decideWithAI({ scannedText });
       if (ai.ok) {
+        let card = ai.decisionCard;
+        if (resolvedLanguage !== 'en') {
+          const translated = await translateDecisionCardWithAI({ decisionCard: ai.decisionCard, language: resolvedLanguage });
+          if (translated.ok) card = translated.decisionCard;
+        }
+
+        const localized = localizeDecisionCard({
+          decisionCard: { ...card, translateVerdict: false },
+          language: resolvedLanguage,
+          labelsOverride: labels
+        });
         return res.json({
-          decisionCard: ai.decisionCard,
-          decisionCardText: ai.decisionCardText,
-          source: 'ai'
+          decisionCard: localized.decisionCard,
+          decisionCardText: formatLocalizedDecisionCardText({ localized }) || ai.decisionCardText,
+          source: 'ai',
+          resolvedLanguage
         });
       }
       if (aiOnly) {
@@ -112,21 +166,35 @@ app.post('/api/decision', async (req, res) => {
   }
 
   const decision = decideFromScan({ scannedText });
-  const decisionCardText = formatDecisionCardText(decision);
+  let card = {
+    verdict: decision.verdict,
+    whyThisMatters: decision.whyThisMatters,
+    whyYouMightCare: decision.whyYouMightCare,
+    confidence: decision.confidence,
+    uncertainty: decision.uncertainty,
+    betterChoiceHint: decision.betterChoiceHint,
+    closure: decision.closure
+  };
+
+  if (resolvedLanguage !== 'en') {
+    const translated = await translateDecisionCardWithAI({ decisionCard: card, language: resolvedLanguage });
+    if (translated.ok) card = translated.decisionCard;
+  }
+
+  const localized = localizeDecisionCard({
+    decisionCard: { ...card, translateVerdict: false },
+    language: resolvedLanguage,
+    labelsOverride: labels
+  });
+
+  const decisionCardText = formatLocalizedDecisionCardText({ localized }) || formatDecisionCardText(decision);
 
   // IMPORTANT: never include ingredient lists or nutrition tables.
   res.json({
-    decisionCard: {
-      verdict: decision.verdict,
-      whyThisMatters: decision.whyThisMatters,
-      whyYouMightCare: decision.whyYouMightCare,
-      confidence: decision.confidence,
-      uncertainty: decision.uncertainty,
-      betterChoiceHint: decision.betterChoiceHint,
-      closure: decision.closure
-    },
+    decisionCard: localized.decisionCard,
     decisionCardText,
-    source: 'heuristic'
+    source: 'heuristic',
+    resolvedLanguage
   });
 });
 
