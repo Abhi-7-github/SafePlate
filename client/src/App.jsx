@@ -256,6 +256,7 @@ function App() {
   const videoRef = useRef(null)
   const streamRef = useRef(null)
   const [cameraOn, setCameraOn] = useState(false)
+  const [cameraReady, setCameraReady] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
   const [ocrError, setOcrError] = useState('')
   const [enhanceOcr, setEnhanceOcr] = useState(true)
@@ -282,9 +283,41 @@ function App() {
     }
   }
 
+  async function attachStreamToVideo(stream) {
+    // The <video> element is only rendered when cameraOn=true.
+    // So we may need to wait a tick for it to mount.
+    const startedAt = Date.now()
+    while (!videoRef.current && Date.now() - startedAt < 1500) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 50))
+    }
+
+    const video = videoRef.current
+    if (!video) return false
+
+    video.onloadedmetadata = () => {
+      video.play().catch(() => {})
+      if ((video.videoWidth || 0) > 0 && (video.videoHeight || 0) > 0) setCameraReady(true)
+    }
+    video.oncanplay = () => {
+      if ((video.videoWidth || 0) > 0 && (video.videoHeight || 0) > 0) setCameraReady(true)
+    }
+
+    video.srcObject = stream
+    await video.play().catch(() => {})
+    return true
+  }
+
   async function startCamera() {
     setOcrError('')
+    setCameraReady(false)
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setCameraOn(false)
+        setOcrError('Camera is not supported in this browser.')
+        return
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: 'environment' },
@@ -294,13 +327,43 @@ function App() {
         audio: false,
       })
       streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        await videoRef.current.play().catch(() => {})
-      }
       setCameraOn(true)
-    } catch {
+
+      const attached = await attachStreamToVideo(stream)
+      if (!attached) {
+        setOcrError('Camera started, but preview could not initialize. Please try again.')
+        return
+      }
+
+      // Proactively wait a moment for the first real frame.
+      // This avoids getting stuck in a state where the stream is granted but the video element reports 0x0.
+      const ok = await waitForVideoReady(4000)
+      setCameraReady(ok)
+      if (!ok) {
+        setOcrError('Camera started, but no video frames are available yet. Try again, or switch browser (Chrome/Edge).')
+      }
+    } catch (err) {
       setCameraOn(false)
+      setCameraReady(false)
+
+      const name = err && typeof err === 'object' && 'name' in err ? String(err.name) : ''
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        setOcrError('Camera permission was blocked. Allow camera access in the browser site settings and try again.')
+        return
+      }
+      if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+        setOcrError('No camera device found.')
+        return
+      }
+      if (name === 'NotReadableError' || name === 'TrackStartError') {
+        setOcrError('Camera is already in use by another app/tab. Close it and try again.')
+        return
+      }
+      if (name === 'SecurityError') {
+        setOcrError('Camera requires a secure context (HTTPS) or localhost.')
+        return
+      }
+
       setOcrError('Could not access camera. Check permissions and try again.')
     }
   }
@@ -313,6 +376,64 @@ function App() {
     streamRef.current = null
     if (videoRef.current) videoRef.current.srcObject = null
     setCameraOn(false)
+    setCameraReady(false)
+  }
+
+  async function waitForVideoReady(timeoutMs = 2500) {
+    const video = videoRef.current
+    if (!video) return false
+
+    const hasDims = () => (video.videoWidth || 0) > 0 && (video.videoHeight || 0) > 0
+    if (hasDims()) return true
+
+    const start = Date.now()
+    return await new Promise((resolve) => {
+      let done = false
+      const finish = (value) => {
+        if (done) return
+        done = true
+        cleanup()
+        resolve(value)
+      }
+
+      const onReady = () => {
+        if (hasDims()) finish(true)
+      }
+
+      const tick = () => {
+        if (hasDims()) finish(true)
+        if (Date.now() - start >= timeoutMs) finish(false)
+      }
+
+      const cleanup = () => {
+        video.removeEventListener('loadedmetadata', onReady)
+        video.removeEventListener('canplay', onReady)
+        video.removeEventListener('playing', onReady)
+        clearInterval(interval)
+        clearTimeout(timeout)
+      }
+
+      video.addEventListener('loadedmetadata', onReady)
+      video.addEventListener('canplay', onReady)
+      video.addEventListener('playing', onReady)
+
+      const interval = setInterval(tick, 100)
+      const timeout = setTimeout(() => finish(false), timeoutMs + 50)
+
+      // Best-effort: if available, wait for a decoded frame callback.
+      // This is often more reliable than canplay/playing on some devices.
+      try {
+        if (typeof video.requestVideoFrameCallback === 'function') {
+          video.requestVideoFrameCallback(() => {
+            if (hasDims()) finish(true)
+          })
+        }
+      } catch {
+        // ignore
+      }
+
+      tick()
+    })
   }
 
   function captureFrameAsDataUrl() {
@@ -398,7 +519,15 @@ function App() {
     setOcrLoading(true)
 
     try {
-      const imageDataUrl = captureFrameAsDataUrl()
+      let imageDataUrl = captureFrameAsDataUrl()
+      if (!imageDataUrl) {
+        // Immediately after starting the camera, some browsers report 0x0 dimensions briefly.
+        const ok = await waitForVideoReady(2500)
+        if (ok) {
+          setCameraReady(true)
+          imageDataUrl = captureFrameAsDataUrl()
+        }
+      }
       if (!imageDataUrl) {
         setOcrError('Camera not ready yet. Try again in a moment.')
         return
@@ -570,9 +699,15 @@ function App() {
               </div>
 
               <div className="cameraViewport">
-                <video ref={videoRef} className="video" playsInline muted />
+                <video ref={videoRef} className="video" playsInline muted autoPlay />
                 <div className="scanWindow" aria-hidden="true" />
               </div>
+
+              {!cameraReady ? (
+                <div className="muted" style={{ marginTop: 8 }}>
+                  Warming up camera…
+                </div>
+              ) : null}
             </>
           )}
 
