@@ -30,12 +30,34 @@ let aiCooldownUntil = 0;
 const app = express();
 
 const corsOriginRaw = (process.env.CORS_ORIGIN || process.env.CLIENT_ORIGIN || '').trim();
-const corsOrigin = corsOriginRaw
-  ? corsOriginRaw
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-  : true;
+
+let corsOrigin;
+if (!corsOriginRaw) {
+  corsOrigin = true;
+} else {
+  const allowed = corsOriginRaw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  corsOrigin = (origin, callback) => {
+    // Non-browser clients (curl, server-to-server) typically omit Origin.
+    if (!origin) return callback(null, true);
+    if (allowed.includes(origin)) return callback(null, true);
+
+    // Dev convenience: Vite may choose a different localhost port (5174, 5175...).
+    try {
+      const u = new URL(origin);
+      const isLocalHost = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+      const isHttp = u.protocol === 'http:' || u.protocol === 'https:';
+      if (isHttp && isLocalHost) return callback(null, true);
+    } catch {
+      // ignore
+    }
+
+    return callback(new Error('Not allowed by CORS'));
+  };
+}
 
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: '15mb' }));
@@ -215,9 +237,18 @@ async function start() {
     // Mongo is optional; keep server usable without it.
   }
 
-  app.listen(port, () => {
+  const server = app.listen(port, () => {
     // eslint-disable-next-line no-console
     console.log(`safeplate-server listening on http://localhost:${port}`);
+  });
+
+  server.on('error', (err) => {
+    if (err && typeof err === 'object' && err.code === 'EADDRINUSE') {
+      // eslint-disable-next-line no-console
+      console.error(`Port ${port} is already in use. Stop the other process or change PORT and try again.`);
+      process.exit(1);
+    }
+    throw err;
   });
 }
 
