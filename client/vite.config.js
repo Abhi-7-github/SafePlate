@@ -14,7 +14,11 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:5050',
+      '/api': {
+        target: 'https://safeplate-h5oz.onrender.com',
+        changeOrigin: true,
+        secure: true,
+      },
     },
   },
 })

@@ -2,6 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import './App.css'
 import { TextGenerateEffect } from '@/components/ui/text-generate-effect'
 
+const API_BASE = (import.meta.env?.VITE_API_BASE_URL || '').toString().replace(/\/$/, '')
+function apiUrl(path) {
+  if (!API_BASE) return path
+  return `${API_BASE}${path}`
+}
+
 function DecisionCard({ card }) {
   if (!card) return null
 
@@ -267,7 +273,7 @@ function App() {
     const controller = new AbortController()
     const t = setTimeout(() => controller.abort(), 1500)
     try {
-      const res = await fetch('/api/health', { signal: controller.signal })
+      const res = await fetch(apiUrl('/api/health'), { signal: controller.signal })
       setApiConnected(Boolean(res.ok))
     } catch {
       setApiConnected(false)
@@ -398,7 +404,7 @@ function App() {
         return
       }
 
-      const res = await fetch('/api/ocr', {
+      const res = await fetch(apiUrl('/api/ocr'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -451,7 +457,7 @@ function App() {
     await checkApiHealth()
 
     try {
-      const res = await fetch('/api/decision', {
+      const res = await fetch(apiUrl('/api/decision'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scannedText, language }),
