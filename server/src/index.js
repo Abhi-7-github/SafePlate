@@ -29,7 +29,15 @@ let aiCooldownUntil = 0;
 
 const app = express();
 
-app.use(cors({ origin: true }));
+const corsOriginRaw = (process.env.CORS_ORIGIN || process.env.CLIENT_ORIGIN || '').trim();
+const corsOrigin = corsOriginRaw
+  ? corsOriginRaw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  : true;
+
+app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: '15mb' }));
 
 app.get('/api/health', (_req, res) => {

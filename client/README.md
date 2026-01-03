@@ -1,4 +1,13 @@
-# React + Vite
+﻿# React + Vite
+
+## Deployed
+- Client (Netlify): https://safeplate7.netlify.app/
+- Server (Render): https://safeplate-h5oz.onrender.com
+
+## Production config
+Set VITE_API_BASE_URL=https://safeplate-h5oz.onrender.com when building on Netlify.
+
+If you prefer to avoid CORS, Netlify can proxy API calls: the repo includes `client/public/_redirects` to forward `/api/*` to the Render server.
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
@@ -13,4 +22,3 @@ The React Compiler is not enabled on this template because of its impact on dev 
 
 ## Expanding the ESLint configuration
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
