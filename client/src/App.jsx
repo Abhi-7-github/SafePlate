@@ -11,13 +11,26 @@ function apiUrl(path) {
 function DecisionCard({ card }) {
   if (!card) return null
 
+  const confidence =
+    typeof card.confidence === 'number' && Number.isFinite(card.confidence)
+      ? Math.round(card.confidence)
+      : null
+
   return (
     <div className="decisionCard" role="region" aria-label="Decision card">
-      <div className="decisionHeader">DECISION CARD</div>
+      <div className="decisionTop">
+        <div className="decisionKicker">DECISION CARD</div>
+        {confidence !== null ? (
+          <div className="decisionMeta">
+            <span className="metaLabel">Confidence</span>
+            <span className="mono">{confidence}%</span>
+          </div>
+        ) : null}
+      </div>
 
-      <div className="row">
-        <span className="label">Verdict:</span>
-        <span className="value">{card.verdict}</span>
+      <div className="decisionVerdict">
+        <div className="metaLabel">Verdict</div>
+        <div className="verdictValue">{card.verdict}</div>
       </div>
 
       <div className="section">
@@ -168,13 +181,26 @@ function getStrings(lang) {
 function DecisionCardLocalized({ card, s }) {
   if (!card) return null
 
+  const confidence =
+    typeof card.confidence === 'number' && Number.isFinite(card.confidence)
+      ? Math.round(card.confidence)
+      : null
+
   return (
     <div className="decisionCard" role="region" aria-label="Decision card">
-      <div className="decisionHeader">{s.decisionCard}</div>
+      <div className="decisionTop">
+        <div className="decisionKicker">{s.decisionCard}</div>
+        {confidence !== null ? (
+          <div className="decisionMeta">
+            <span className="metaLabel">{s.confidence.replace(/:$/, '')}</span>
+            <span className="mono">{confidence}%</span>
+          </div>
+        ) : null}
+      </div>
 
-      <div className="row">
-        <span className="label">{s.verdict}</span>
-        <div className="value">
+      <div className="decisionVerdict">
+        <div className="metaLabel">{s.verdict.replace(/:$/, '')}</div>
+        <div className="verdictValue">
           <TextGenerateEffect words={String(card.verdict ?? '')} filter={true} duration={0.35} />
         </div>
       </div>
@@ -207,10 +233,12 @@ function DecisionCardLocalized({ card, s }) {
         </ul>
       </div>
 
-      <div className="section">
-        <div className="sectionTitle">{s.confidence}</div>
-        <div className="mono">{card.confidence}%</div>
-      </div>
+      {confidence !== null ? (
+        <div className="section">
+          <div className="sectionTitle">{s.confidence}</div>
+          <div className="mono">{confidence}%</div>
+        </div>
+      ) : null}
 
       <div className="section">
         <div className="sectionTitle">{s.uncertainty}</div>
@@ -633,14 +661,19 @@ function App() {
 
   return (
     <div className="page">
-      <h1 className="title">{s.title}</h1>
-      <p className="subtitle">{s.subtitle}</p>
+      <div className="pageHeader">
+        <div>
+          <h1 className="title">{s.title}</h1>
+          <p className="subtitle">{s.subtitle}</p>
+        </div>
 
-      <div className="status" aria-live="polite">
-        {s.service} {apiConnected === null ? s.checking : apiConnected ? s.connected : s.notConnected}
+        <div className="status" aria-live="polite">
+          {s.service} {apiConnected === null ? s.checking : apiConnected ? s.connected : s.notConnected}
+        </div>
       </div>
 
-      <div className="panel">
+      <div className="layout">
+        <div className="panel">
         <div className="row" style={{ alignItems: 'center' }}>
           <span className="label">{s.language}:</span>
           <select
@@ -751,15 +784,18 @@ function App() {
         </div>
 
         {error ? <div className="error">{error}</div> : null}
-      </div>
+        </div>
 
-      {cardText ? (
-        <pre className="cardText" aria-label="Decision card text">
-          {cardText}
-        </pre>
-      ) : (
-        <DecisionCardLocalized card={card} s={s} />
-      )}
+        <div className="output" aria-live="polite">
+          {cardText ? (
+            <pre className="cardText" aria-label="Decision card text">
+              {cardText}
+            </pre>
+          ) : (
+            <DecisionCardLocalized card={card} s={s} />
+          )}
+        </div>
+      </div>
     </div>
   )
 }
