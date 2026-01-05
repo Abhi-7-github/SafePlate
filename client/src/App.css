@@ -172,6 +172,7 @@ button {
   color: var(--text-main);
   font-weight: 600;
   cursor: pointer;
+  transition: background 140ms ease, transform 140ms ease, filter 140ms ease;
 }
 
 .primary {
@@ -185,6 +186,19 @@ button {
 
 button:hover {
   background: rgba(255, 255, 255, 0.05);
+}
+
+/* Primary button (e.g., Get decision card) needs a dedicated hover state.
+   Otherwise the generic button:hover overrides its solid background. */
+.primary:hover:not(:disabled) {
+  background: #ffffff;
+  filter: brightness(0.92);
+  transform: translateY(-1px);
+}
+
+.primary:active:not(:disabled) {
+  filter: brightness(0.88);
+  transform: translateY(0);
 }
 
 /* Decision Card */
